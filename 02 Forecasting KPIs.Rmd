@@ -1,0 +1,216 @@
+---
+title: "Forecasting KPIs"
+author: "Jessica Langford"
+output:
+  html_document:
+    df_print: paged
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Cmd+Shift+Enter*. 
+
+Forecasting metric performance is one of the basic, but most important functions a data scientist or business analyst can perform.  Understanding the future behavior of KPIs and metrics can help organizations anticipate and respond rather than await and react. 
+
+There are many different statistical and machine learning models that can provide accurate predictions. We are going to take a look at four different models: Holt-Winters Addative, Holt-Winters Multiplicative, ARIMA, and Double Exponential Smoothing.  
+
+We will start by loading in the necessary libraries and taking a look at the data that we will be examining in this exercise.
+
+```{r message = FALSE}
+library(readr)
+library(dplyr)
+library(purrr)
+library(lubridate)
+library(forecast)
+library(ggplot2)
+library(labeling)
+library(officer)
+library(rvg)
+library(tidyr)
+library(plotly)
+```
+
+We are also going to reference a file that has all of the necessary functions for forecasting.  Don't worry, we will share this with you!  If you are not connecting with query service, we recommend you download both the demo data file and the timeSeriesFunctions.R file to the same directory.  Simply replace the character string being set to the file_dir object and the rest of the code should work. 
+
+```{r message = FALSE}
+file_dir = "SET YOUR FILE DIRECTORY HERE"
+file_name = "monthlyData.csv"
+source(paste0(file_dir, "timeSeriesFunctions.R"))
+monthly_data = read_csv(paste0(file_dir, file_name))
+```
+
+
+```{r message = FALSE}
+head(monthly_data)
+```
+
+We have monthly data beginning 1/1/2016 and ending 1/1/2020.  This data set contains revenue data for three data sources: Point of Sale (POS), Call Center (CallCenter), and Online (Online).  Our goal is to predict and provide guidance for what will happen for the rest of FY2020, and particularly, next month (February 2020).
+
+```{r}
+monthly_data_pivot = monthly_data %>%
+  pivot_longer(cols = -DateFrom, 
+               names_to = "Data Source",
+               values_to = "Revenue")
+
+head(monthly_data_pivot)
+
+ggplot(data = monthly_data_pivot, aes(x = DateFrom, y = Revenue)) +
+  geom_line() +
+  facet_wrap(~ `Data Source`, strip.position = "right", ncol = 1)
+```
+
+There seems to be a fairly identifiable set of trends in all three of my data sources.  Any good forecasting algorithm should be able to recognize and estimate the effects of seasonality. There are some really great packages and functions that are available out-of-the-box to create time series models.  As mentioned previously, we will be taking a look at 4 different models. We are going to separate our data into training and testing periods.  Some of the model functions require a time series object, so we will be creating that as well.  
+
+```{r}
+  num_months = nrow(monthly_data)
+  num_years = floor(num_months/12)
+  train_dates = seq(from = monthly_data$DateFrom[1], 
+                    by = "month", 
+                    length.out = 12*(num_years-1))
+  test_dates = seq(from = tail(train_dates, n = 1) + months(1), 
+                   to = tail(monthly_data$DateFrom, n = 1), 
+                   by = "month")
+
+  metric_vector = monthly_data %>%
+    filter(DateFrom %in% train_dates) %>%
+    select(Online) %>%
+    pull()
+  metric_dates = monthly_data %>%
+    filter(DateFrom %in% train_dates) %>%
+    select(DateFrom) %>%
+    pull()
+  
+  train_ts = ts((metric_vector), 
+                start = c(year(metric_dates[1]), month(metric_dates[1])), 
+                frequency = 12)
+  
+  train_ts
+```
+
+We will now use our training data set in the four models that we would like to explore.  I have written a custom function, arimaModel(), that calculates the optimal parameters values (p, d, q) based on the data provided.  The models are saved as separate objects.  
+
+```{r}
+  model_hwa = HoltWinters(train_ts, optim.start = c(alpha = 0.1, beta = 0.1, gamma = 0.1),
+                          optim.control = list("L-BFGS-B"), seasonal="additive")
+  model_hwm = HoltWinters(train_ts, optim.start = c(alpha = 0.1, beta = 0.1, gamma = 0.1),
+                          optim.control = list("L-BFGS-B"), seasonal = "multiplicative")
+  model_des = ets(y = metric_vector, model="AAN", damped=FALSE, opt.crit="lik")
+  model_arima = arimaModel(metric_vector)
+```
+
+Now let's apply these models to the testing data set to see how accurate they are.  There are many different ways you can evaluate the accuracy of a model.  I have written a custom function, mapeCalc(), the calculate the Mean Absolute Percentage Error of each model. We will choose the model with the smallest MAPE.
+
+```{r}
+ test_data = monthly_data %>%
+    filter(DateFrom %in% test_dates)
+
+ testing_metric_vector = test_data$Online
+ n_forecast = length(testing_metric_vector)
+ 
+ forecast_hwa = forecast(model_hwa, h = n_forecast)
+ forecast_hwm = forecast(model_hwm, h = n_forecast)
+ forecast_des = forecast(model_des, h = n_forecast)
+ forecast_arima = forecast(model_arima, h = n_forecast)
+
+ mape_hwa = mapeCalc(forecast_hwa, testing_metric_vector)
+ mape_hwm = mapeCalc(forecast_hwm, testing_metric_vector)
+ mape_des = mapeCalc(forecast_des, testing_metric_vector)
+ mape_arima = mapeCalc(forecast_arima, testing_metric_vector)
+ 
+ c(HWA = mape_hwa, HWM = mape_hwm, DES = mape_des, ARIMA = mape_arima)
+```
+
+Based on these MAPE values, we would choose the Holt-Winters Multiplicative model to describe monthly revenue from Online sources. 
+
+I've written some code that functionalizes everything we have done here and wraps it up neatly and cleanly. We simply need to call the createForecast() function and provide a month for which we would like to forecast.  Since our data set ends in January 2020, we will make a forecast for February 2020.
+
+```{r}
+  forecast_month = '2020-02-01'
+  
+  forecast = createForecast(monthly_data, forecast_month)
+  forecast$monthly_forecast
+    ```
+  
+So we have our answer, but our job isn't done yet.  Visualization is an equally important part of any project.  I've found that effective visualizations can make or break a project. Thankfully, R offers a lot of great visualizations capabilities.  Two of my favorites are the ggplot2 and plotly packages.
+
+The ggplot2 package is part of the tidyverse.  As such, it works great with dplyr notation.  I've written a tsPlot() function to create a nice looking plot with our forecast, and 95% confidence intervals shown.
+  
+```{r}  
+tsPlot = function(monthly_data, product_name, model_ts, color_scheme, forecast_month) {
+  forecast_df = data.frame(DateFrom = model_ts[[product_name]]$forecast_dates,
+                           Value = as.vector(model_ts[[product_name]]$final_forecasts$mean),
+                           Lower = model_ts[[product_name]]$final_forecasts$lower[,2],
+                           Upper = model_ts[[product_name]]$final_forecasts$upper[,2])
+  
+  forecast_df = forecast_df %>%
+    mutate(Lower = ifelse(DateFrom < as.Date(forecast_month), NA, Lower),
+           Upper = ifelse(DateFrom < as.Date(forecast_month), NA, Upper))
+  
+  
+  filter_date = as.Date(paste0(year(min(forecast_df$DateFrom)) - 1, "-01-01"))
+  actual_df = monthly_data %>%
+    select(DateFrom, !!as.name(product_name)) %>%
+    rename(Value = !!as.name(product_name)) %>%
+    filter(DateFrom >= filter_date)
+  
+  color = color_scheme[[product_name]]
+  forecast_color = color_scheme[["Forecast"]]
+  
+  min_date = min(actual_df$DateFrom)
+  max_date = max(forecast_df$DateFrom)
+  min_y = min(forecast_df$Lower, actual_df$Value, na.rm = TRUE)
+  max_y = max(forecast_df$Upper, actual_df$Value, na.rm = TRUE)
+  num_breaks = numBreaks(c(min_y, max_y))
+  
+  x_breaks = seq(from = min_date,
+                 to = max_date,
+                 by = "3 months")
+  x_labels = format(x_breaks, "%b %y")
+
+  p1 = ggplot(data = actual_df, aes(x = DateFrom, y = Value)) +
+    geom_line(color = color) +
+    geom_point(color = color, fill = "white", shape = 21) +
+    geom_ribbon(data = forecast_df, aes(ymin = Lower, ymax =  Upper), fill = forecast_color, alpha = .25) +
+    geom_line(data = forecast_df, aes(x = DateFrom, y = Value), color = forecast_color) + 
+    geom_point(data = forecast_df, aes(x = DateFrom, y = Value), color = forecast_color, 
+               fill = "white", shape = 21) + 
+    scale_x_date(breaks = x_breaks,
+                 labels = x_labels,
+                 limits = c(min_date, max_date)) +
+    scale_y_continuous(breaks = extended(dmin = min_y,
+                                         dmax = max_y,
+                                         m = num_breaks), labels = f <- function(x) paste0("$",x*1e-6,"M")) +
+    my_theme()
+
+  return(p1)
+}
+
+  ggplot_fig = tsPlot(monthly_data = monthly_data, 
+                       product_name = "Online", 
+                       model_ts = forecast$model_ts, 
+                       color_scheme = c("Online" = "black", "Forecast" = "red"), 
+                       forecast_month = '2020-02-01') +
+                  theme(axis.text.x = element_text(color="black", size=10, family = "Adobe Clean"),
+                        axis.text.y = element_text(color="black", size=10, family = "Adobe Clean"))
+
+  ggplot_fig
+```
+
+The plotly package is another great option for visualizing your data.  One of the coolest things about plotly is that it creates interactive graphics!  Here we provide an example of an interactive and animated graphic.
+
+```{r}
+plotly_fig <- forecast %>%
+  plotlyDFManipulation() %>%
+  plot_ly(x = ~ date, y = ~ Revenue, split = ~ Revenue_Source,
+          frame = ~ frame, type = 'scatter', mode = 'lines', 
+          line = list(simplyfy = F)) %>%
+  layout(xaxis = list(title = "Date", zeroline = F),
+         yaxis = list(title = "Revenue", zeroline = F)) %>% 
+  animation_opts(frame = 100, transition = 0, redraw = FALSE) %>%
+  animation_slider(hide = T) %>%
+  animation_button(x = 1, xanchor = "right", y = 0, yanchor = "bottom")
+
+plotly_fig
+```
+
+I'm sure that there are many of you out there that use PowerPoint to communicate a lot of your findings.  Our next example will show you how to create impactful PowerPoint presentations in a fraction of the time.

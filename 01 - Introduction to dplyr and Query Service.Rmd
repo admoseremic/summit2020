@@ -1,0 +1,122 @@
+---
+title: "Introduction to dplyr & R notebooks"
+author: "Trevor Paulsen"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Cmd+Shift+Enter*. 
+
+```{r}
+plot(cars)
+```
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Cmd+Option+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Cmd+Shift+K* to preview the HTML file). 
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
+
+
+# Dplyr basics
+Now let's talk about dplyr!
+Dplyr is a very popular R library that boils down complex data manipulation tasks into a series of verbs. It's kinda similar to SQL, but way easier to use and you can do a lot more with much less code.
+
+Go here for more examples and information: https://cran.r-project.org/web/packages/dplyr/vignettes/dplyr.html
+
+```{r}
+# First read a file
+example_data = read.csv("/Users/tpaulsen/Desktop/OneDrive/Summit 2020/R Session Code/example datasets/example_data.csv", header = TRUE, sep = ",")
+
+# Install dplyr using install.packages("dplyr")
+library(dplyr)
+
+# FILTER: filter the data to a single campaign value
+one_campaign = example_data %>%
+  filter(tracking_code == "campaign100")
+
+# ARRANGE: sort the datafeed by hit time gmt
+time_sorted_data = example_data %>%
+  arrange(hit_time_gmt)
+
+# SELECT: select only certain columns of a datafeed (like a SQL select) and rename them
+couple_columns_from_data = example_data %>%
+  select(
+    cookie_id,
+    timestamp = hit_time_gmt
+  )
+
+# MUTATE: create a new column using some calculation
+data_with_modifications = example_data %>%
+  mutate(
+    # Add two fields together
+    discounts_plus_orders = sum(discounts, orders)
+  )
+
+# GROUP BY + SUMMARIZE: perform operations on groupings of data
+person_level_aggregations = example_data %>%
+  group_by(stitched_id) %>%
+  summarize(
+    rows = n(),
+    lifetime_value = sum(revenue)
+  )
+
+# Putting it all together:
+person_lifetime_value = example_data %>%
+  group_by(stitched_id) %>%
+  summarize(
+    lifetime_value = sum(revenue),
+    lifetime_orders = sum(orders)
+  ) %>% ungroup() %>%
+  filter(lifetime_orders > 0) %>%
+  arrange(-lifetime_value)
+
+head(person_lifetime_value)
+
+```
+
+
+# Connecting dplyr to Query Service or an external database
+The best part about dplyr is that you can use it to interface with nearly any system that accepts SQL commands, not just on your local machine!
+
+This means using the same dplyr commands above, you can run the same operations at scale with Adobe Experience Platform or with databases like MySQL, MariaDB, Postgres interfaces (including Amazon Redshift), SQLite, odbc, or Google BigQuery.
+
+To make it work, just install "dbplyr" (install.packages("dbplyr") to install) in addition to dplyr above. See this link for more information: https://cran.r-project.org/web/packages/dbplyr/vignettes/dbplyr.html
+
+```{r}
+# First, create a connection to your database of choice. Each database will have its own parameters to enter, but the first parameter is always the type of database
+# Here's how to connect to Query Service:
+require("RPostgreSQL")
+library(dbplyr)
+library(dplyr)
+
+drv = dbDriver("PostgreSQL")
+host = "mycompany.platform-query.adobe.io"
+port = 80
+usr = "my_user@AdobeOrg"
+
+# Putting your password in a string isn't safe! Rstudio gives this handy option:
+pw = rstudioapi::askForPassword("Enter Query Service Password")
+
+con = dbConnect (drv, dbname = "dbname=all sslmode=require", host = host, port = port, user = usr, password = pw)
+on.exit(dbDisconnect(con))
+
+# Connect to a dataset in Experience Platform:
+analytics_demo_data = tbl(con, "analytics_demo_data")
+
+# Create a friendly name for a specific field in your XDM dataset schema
+orders_var = sql("_mycompany.orders")
+
+analytics_demo_data %>%
+  summarize(
+    rows = sum(ifelse(orders_var == 1, 1, 0))
+  ) %>% collect()
+
+head(analytics_demo_data)
+```
+
+
+If you use an on premise setup, you can connect dplyr directly to a SparkSQL backend using a library called "sparklyr" which is also amazing. You can read all about that here: https://spark.rstudio.com/
+
+For the rest of this session, we'll just use a local file so that results can be easily reproduced, but I'll add comments to show you how you'd do things if connected to an external database.

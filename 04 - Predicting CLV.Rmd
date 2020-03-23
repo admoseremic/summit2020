@@ -1,0 +1,223 @@
+---
+title: "Predicting Customer Lifetime Value"
+author: "Jessica Langford"
+output:
+  html_document:
+    df_print: paged
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Cmd+Shift+Enter*. 
+
+Being able to predict which customers will make future purchases and how much they are willing to spend with you is extremely valuable information.  These two characteristics -- transaction rate and average spend -- form the basis of one family of Customer Lifetime Value models.  There are nearly limitless applications of how to utilize information about the potential future value of your customers; from capacity and production planning to personalizing marketing strategies down to the individual customer level. 
+
+There are a couple of R packages that have thoroughly vetted implementations of many different types of Customer Lifetime Values - BTYD and BTYDplus.  BTYD stands for 'Buy 'Til You Die'. There is a lot of great documentation about these packages, including a couple of documents that walk you through line-by-line how to implement the models and methods in these packages. There is far more in these packages than we have time to cover, so I would recommend reviewing the following materials to better understand the models, assumptions, and outputs:
+- https://rdrr.io/cran/BTYD/f/inst/doc/BTYD-walkthrough.pdf
+- https://cran.r-project.org/web/packages/BTYDplus/vignettes/BTYDplus-HowTo.pdf 
+
+For purposes of this demonstration, we will be estimating two quantities that help us understand the potential value of our individual customers: expected number of transactions and average transaction value.  Modeling both of these quantities begins with the same data set.  Let's use Query Service to get that data from AEP. I've written a small, but useful function for connecting to Query Service.  All of the inputs you need can be found on the Credentials tab of the Queries section of AEP.  I will use this information to create and store a connection object.  
+
+```{r, message = FALSE, warning = FALSE}
+require("RPostgreSQL")
+library(lubridate)
+library(BTYD)
+library(BTYDplus)
+library(dbplyr)
+library(dplyr)
+library(rstudioapi)
+
+file_dir = "SET YOUR FILE DIRECTORY HERE"
+source(paste0(file_dir, "clvFunctions.R"))
+```
+
+```{r}
+connectToQueryService = function(host_name, port = 80, db_driver = "PostgreSQL", db_name){
+  drv = dbDriver(db_driver)
+  port = port
+  con = dbConnect (drv, 
+                   dbname = paste0("dbname=", db_name, " sslmode=require"), 
+                   host = host_name, 
+                   port = port, 
+                   user = rstudioapi::askForPassword("Username"), 
+                   password = rstudioapi::askForPassword("Password"))
+  
+  return(con)
+}
+
+con = connectToQueryService(host_name = "PUT YOUR HOSTNAME HERE",
+                            db_name = "PUT YOUR DATABASE NAME HERE")
+
+```
+
+Now I can use dbplyr and dplyr notation to query against the data available in this data base.  I've written another function, lifetimeQuery(), to select and format the columns I need to do this analysis; customer ID, revenue, and a timestamp. Query Service is limited to returning 50,000 rows of data at a time, so I've written another function, getCLVData(), to loop through the data base until all the data has returned. 
+
+```{r, message = FALSE, warning = FALSE}
+lifetimeQuery = function(tbl_con, revenue_id, user_id, page = 1, page_size = 50000) {
+  revenue = sql(revenue_id)
+  user_id = sql(user_id)
+  
+  lifetime_value_data = tbl_con %>%
+    filter(revenue > 0) %>%
+    arrange(timestamp) %>%
+    mutate(user_id = user_id,
+           revenue = revenue,
+           timestamp = timestamp,
+           row_num = row_number()) %>%
+    select(user_id,
+           revenue,
+           timestamp,
+           row_num) %>%
+    filter(row_num > (page-1)*page_size & row_num <= page_size * page ) %>%
+    select(-row_num) %>%
+    collect()
+  
+  return(lifetime_value_data)
+}
+
+getCLVData = function(table_name, con_obj, query_size = 50000, revenue_id, user_id) {
+  table_conn = tbl(con_obj, table_name)
+  
+  page_iter = 1
+  query_df = data.frame()
+  while(query_size >= 50000) {
+    new_df = lifetimeQuery(tbl_con = table_conn,
+                           revenue_id = revenue_id,
+                           user_id = user_id,
+                           page = page_iter)
+    
+    query_df = query_df %>%
+      bind_rows(new_df)
+    
+    query_size = nrow(new_df)
+    page_iter = page_iter + 1
+  }
+  
+  # Convert timestamp to date and rename columns
+  query_df = query_df %>%
+    mutate(date = as.Date(timestamp, "%m/%d/%y %H:%M")) %>%
+    rename(cust = user_id,
+           sales = revenue) %>%
+    select(-timestamp)
+  
+  dbDisconnect(con)
+  return(query_df)
+}
+
+ltv_df = getCLVData(table_name = "PUT YOUR TABLE NAME HERE",
+                    con_obj = con,
+                    revenue_id = "PUT YOUR REVENUE ID HERE",
+                    user_id = "PUT YOUR USER ID ID HERE")
+```
+
+If you don't have AEP, we've provided the same data used in the demo as a csv file for you to download.  If using our sample data, run the following chunk of code, but set the file_dir to a text string with the location of where the ltv_query_data.csv file is stored. 
+
+```{r}
+file_dir = "PUT YOUR FILE DIRECTORY HERE"
+file_name = "ltv_query_data.csv"
+ltv_df = read_csv(paste0(file_dir, file_name))
+```
+
+
+```{r}
+head(ltv_df)
+```
+
+The BTYD and BTYDplus packages expect the data in a very specific format and so our queries and functions have been built in a way that is congruent with those requirements. First, let's model the number of transactions made by a customer. We are going to use the BG/NBD framework to model transaction rate.  A Beta-Geometric distribution with parameters *s* and $\beta $ describe the rate at which customers dropout and a Negative Binomial Distribution (NBD) with parameters *r* and $\alpha $ describe the number of transactions. To fit this model using the BTYD package, we must first manipulate the data into a customer-by-sufficient-statistic (cbs) format.  This involves a number of processing chores: merging same-date transactions, optionally splitting the data into a calibration training set, splitting repeat and one-time transactions, and accounting for varying entry times by customer.  The owners of the BTYD package have wrapped up all these tasks into one function, elog2cbs().
+
+The elog2cbs() function has an optional calibration date parameter.   This is so you can easily sample your data or potentially partition your data set into training and testing datasets.  These models are quite computationally heavy, so you may not want to use all available data to estimate your BG/NBD parameters. The output from this function will be fed directly into our parameter estimation functions.
+
+```{r}
+calibration_cbs = elog2cbs(ltv_df, units = "week", T.cal = "2019-11-15")
+head(calibration_cbs)
+```
+
+As you can see, the customer-by-sufficient-statistic data frame that is created has a few extra columns.  The documentation on the elog2cbs() gives us the interpretation of the columns as follows:  
+
+- cust: Customer id (unique key).
+- x: Number of recurring events in calibration period.
+- t.x: Time between first and last event in calibration period.
+- litt: Sum of logarithmic intertransaction timings during calibration period.
+- sales: Sum of sales in calibration period, incl. initial transaction.
+- sales.x: Sum of sales in calibration period, excl. initial transaction. 
+- first: Date of first transaction in calibration period.
+- T.cal: Time between first event and end of calibration period.
+- T.star: Length of holdout period. 
+- x.star: Number of events within holdout period. 
+- sales.star: Sum of sales within holdout period. 
+
+Now that the data is in the proper format, we can estimate the parameter values of the BG/NBD process.  
+
+```{r}
+bgnbd_params = calculateBGNBDParams(calibration_cbs)
+bgnbd_params
+```
+
+Now we need to develop a model for the average transaction value for a customer.  We will use a two-layered hierarchical model.  The average transaction value will be Gamma distributed with shape parameter *p*. The scale parameter of this Gamma distribution is also Gamma distributed, with shape and scale parameters *q* and $\gamma $, respectively.  Estimating these parameters requires the data to be in a slightly different format than the cbs format we used for the BG/NBD model.  Instead, we simply need the average transaction value and total number of transactions for each customer.  This is easily obtained using dplyr notation on the ltv_df object. 
+
+```{r}
+  spend_df = ltv_df %>%
+    group_by(cust) %>%
+    summarise(average_spend = mean(sales),
+              total_transactions = n())
+  
+  head(spend_df)
+```
+
+Now let's plug this formatted data into the spend.EstimateParameters() function from the BTYD package to get the parameter values for our Gamma-Gamma spend model.
+
+```{r}
+  gg_params = spend.EstimateParameters(spend_df$average_spend, 
+                                       spend_df$total_transactions)
+
+  gg_params
+```
+
+With all the parameters need to understand transaction and average revenue behavior, we can now apply these models to our entire cohort of customers.  To do so, we will need to create a cbs data frame for our entire data set (i.e., no calibration period). We can make use of the elog2cbs() function again, but omit the calibration_date argument.  We can then calculate expected transactions and average transaction value for the next 12 weeks for each customer. 
+
+```{r}
+customer_cbs = elog2cbs(ltv_df, units = "week")
+customer_expected_trans <- data.frame(cust = customer_cbs$cust,
+                                      expected_transactions = 
+                                        bgnbd.ConditionalExpectedTransactions(params = bgnbd_params,
+                                                                              T.star = 12,
+                                                                              x = customer_cbs[,'x'],
+                                                                              t.x = customer_cbs[,'t.x'],
+                                                                              T.cal  = customer_cbs[,'T.cal']))
+
+customer_spend = ltv_df %>%
+  group_by(cust) %>%
+  summarise(average_spend = mean(sales),
+            total_transactions = n())
+
+customer_expected_spend = data.frame(cust = customer_spend$cust,
+                                     average_expected_spend = 
+                                        spend.expected.value(gg_params,
+                                                             m.x = customer_spend$average_spend,
+                                                             x = customer_spend$total_transactions))
+
+```
+
+Combining these two data frames together gives us the one-year customer value for each person in our data set.
+
+```{r, message = FALSE, warning = FALSE}
+merged_customer_data = customer_expected_trans %>%
+  full_join(customer_expected_spend) %>%
+  mutate(clv = expected_transactions * average_expected_spend,
+         clv_bin = case_when(clv >= quantile(clv, .9, na.rm = TRUE) ~ "high",
+                             clv >= quantile(clv, .5, na.rm = TRUE) ~ "medium",
+                             TRUE ~ "low"))
+
+head(merged_customer_data)
+
+merged_customer_data %>%
+  group_by(clv_bin) %>%
+  summarise(n = n())
+```
+
+Next I can save it as a csv file and import this information back into AEP and analyze these customers with CJA!
+
+```{r}
+file_dir = "PUT YOUR FILE DIRECTORY HERE"
+write_csv(ltv_df, path = paste0(file_dir, "clv_output.csv"))
+```

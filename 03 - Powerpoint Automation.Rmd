@@ -1,0 +1,155 @@
+---
+title: "PowerPoint Automation"
+author: "Jessica Langford"
+output:
+  html_document:
+    df_print: paged
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Cmd+Shift+Enter*. 
+
+Using the output from our forecasting notebook, I’m going to show you how you can automate that output to a really slick looking PowerPoint presentation.  
+
+```{r message = FALSE}
+  library(readr)
+  library(dplyr)
+  library(purrr)
+  library(lubridate)
+  library(forecast)
+  library(ggplot2)
+  library(labeling)
+  library(officer)
+  library(rvg)
+  library(tidyr)
+
+  file_dir = "SET YOUR FILE DIRECTORY HERE"
+  file_name = "monthlyData.csv"
+  source(paste0(file_dir, "timeSeriesFunctions.R"))
+  monthly_data = read_csv(paste0(file_dir, file_name))
+  
+  forecast_month = '2020-02-01'
+    
+  forecast = createForecast(monthly_data, forecast_month)
+  forecast$monthly_forecast
+```
+
+So this is where we left off.  We've got our forecast numbers for February and we want to something a little more exciting that just copy and paste the results in an email.  
+
+The officeR package allows you to access and manipulate 'Microsoft Word' and 'Microsoft PowerPoint' files directly from R. Although you can use default templates, I've found it very useful to create my own templates for my particular purposes.  You can do this as well and make sure that fonts, color schemes, and other general formatting properities are aligned with your organization's best practices. For this exercise, I've created the following template:
+
+![](/Users/langford/OneDrive - Adobe Systems Incorporated/Adobe/Summit 2020/Forecasting/ppt_template_picture.png)
+
+This is the Slide Master view of the file.  As you can see, I've created a slide with my own laytout named 'monthly_forecast'. There are some text labels for different values and summarization sections and you get a general idea of what this presentation will provide. You'll notice there are a few objects that say 'Click to edit Master text styles'.  These are called Content Placeholders.  Content Placeholders are helpful if you have content (including text, pictures, and graphs) that are fairly consistant between renderings of report.  Using Content Placeholders is one way that you can insert content into a PowerPoint presentation. The second method of inserting content into a presentation is by specifying a location using the ph_location() function.  The ph_location() function has arguments for content height and width, as well as top and left.  These arguments are synonymous with the Size and Position specifications in the Format Shape menu for an object in PowerPoint. 
+
+Before we can create the report, we need to create some visualizations to go in our report! In the timeSeriesFunction.R file, there are functions that allow us to create three different types of visualizations: 
+donut charts (donutChart()), time series line plots (tsPlot()), and bar charts (barChart()).  I've wrapped these three functions into another function, generateVisualizations(). The generateVisualizations() function takes the output from the createForecast() function to visualize our output.  
+
+```{r}
+generateVisualizations = function(my_forecast, color_scheme) {
+  product_names = my_forecast$product_names
+  monthly_data = my_forecast$monthly_data
+  model_ts = my_forecast$model_ts
+  forecast_month = my_forecast$forecast_month
+
+  product_plots =  product_names %>%
+    map(~ tsPlot(monthly_data, product_name = .x, 
+                 model_ts, 
+                 color_scheme = color_scheme, 
+                 forecast_month = forecast_month)) %>%
+    set_names(product_names)
+
+  donut_charts = product_names %>%
+    map(~ donutChart(monthly_data, model_ts, forecast_month, .x, color_scheme = color_scheme)) %>%
+    set_names(product_names)
+  
+  bar_chart = barChart(product_names, model_ts, forecast_month, color_scheme = color_scheme)
+  
+  return(list(product_plots = product_plots,
+              donut_charts = donut_charts,
+              bar_chart = bar_chart))
+}
+```
+
+One really helpful function is the map() function from the purrr library. The purrr library has a number of helpful functions that replicate the apply-family of functions in dplyr notation. If you find yourself running a lot of loops, you may want to see if the map() function can help simplify your code. 
+
+```{r}
+my_colors = c("CallCenter" = "#FD292B",
+              "POS" = "#145B65",
+              "Online" = "#1A9CA4",
+              "Forecast" = "#BBE6EF")
+visualizations = generateVisualizations(forecast, my_colors)
+
+visualizations$product_plots[["POS"]]
+visualizations$donut_charts[["POS"]]
+visualizations$bar_chart
+```
+
+Now that we have visualizations, we need to insert them into our PowerPoint layout.  I've written a function called createPPTX() that takes all my inputs and writes a pptx file.  There are several arguments:
+- my_forecast: The object that is returned from the createForecast() function.
+- color_scheme: A named vector for the color coordinates for each product and color for forecasted predictions.
+- pptx_tempate: A character string with the path to the PowerPoint file that contains your template.
+- pptx_master: A character string with the name of the master laytout from your pptx_template.
+- pptx_layout: A character string with the name of the laytout from your pptx_template.
+- file_out: A character string with the path (include the name and '.pptx' extension) to write the output.
+
+The forecast_slide_list object contains all the information needed to place content into the layout. As you can see, I'm using a combination of Content Placeholders and ph_location objects to put content into the report. The forecast_slide_list object is then fed into a loop that uses the ph_with() function from the officeR package to place objects into the document.  The end result is then written to the path and name specified in the file_out argument.
+
+```{r}
+createPPTX = function(my_forecast, color_scheme, pptx_template, pptx_master, pptx_layout, file_out) {
+  visualizations = generateVisualizations(my_forecast, color_scheme)
+  
+  month_text = toupper(format(as.Date(my_forecast$forecast_month), "%B %Y"))
+  year_text = toupper(paste0("FY", year(as.Date(my_forecast$forecast_month))))
+
+  forecast_slide_list = list(value = list(visualizations$product_plots$CallCenter,
+                                          visualizations$product_plots$Online,
+                                          visualizations$product_plots$POS,
+                                          visualizations$bar_chart,
+                                          visualizations$donut_charts$CallCenter,
+                                          visualizations$donut_charts$Online,
+                                          visualizations$donut_charts$POS,
+                                          month_text, month_text, year_text),
+                             location = list(c(left = .51, top = 1.8, height = 1.63, width = 6.68),
+                                             c(left = .51, top = 3.79, height = 1.63, width = 6.68),
+                                             c(left = .51, top = 5.78, height = 1.63, width = 6.68),
+                                             c(left = 7.13, top = 1.76, height = 1.99, width = 6.53),
+                                             c(left = 7.25, top = 3.88, height = 4.04, width = 2.39),
+                                             c(left = 9.15, top = 3.88, height = 4.04, width = 2.39),
+                                             c(left = 11.13, top = 3.88, height = 4.04, width = 2.39),
+                                             "Content Placeholder 20", 
+                                             "Content Placeholder 22",
+                                             "Content Placeholder 2"))
+  
+  doc = read_pptx(pptx_template)
+  doc = doc %>%
+    add_slide(layout = pptx_layout, master = pptx_master)
+  
+  for(i in seq_along(forecast_slide_list$value)){
+    doc = doc %>%
+      ph_with(value = createValue(forecast_slide_list$value[[i]]),
+              location = createLocation(forecast_slide_list$location[[i]]))
+  }
+
+  print(doc, file_out)
+  
+}
+```
+
+Let's see what this looks like when we put all the pieces together.Be sure to update the character string for the pptx_template argument, as well as the file_out argument.  
+
+```{r}
+  createPPTX(my_forecast = forecast, color_scheme = my_colors, 
+             pptx_template = "TEMPLATE FILE LOCATION AND NAME", 
+             pptx_master = "Office Theme", 
+             pptx_layout = "monthly_forecast", 
+             file_out = paste0("FILE OUT DIRECTORY", "Revenue Forecast ", forecast_month, ".pptx"))
+```
+![](/Users/langford/OneDrive - Adobe Systems Incorporated/Adobe/Summit 2020/Forecasting/ppt_output_picture.png)
+
+If we open up the file we just created, we see the result is a nicely formatted PowerPoint that goes far beyond a simple copy and paste of the forecasted results.  The best part is that we can do all of this -- from forecasting values to PowerPoint output -- with just a few lines of reusable code.  Creating monthly reports just went from taking hours, to just a couple of seconds. 
+
+
+
+
